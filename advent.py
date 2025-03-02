@@ -11,29 +11,61 @@ from datetime import datetime
 from openai import OpenAI
 
 client = OpenAI(
-    api_key=os.environ["GEMINI_API_KEY"],
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=os.environ["GEMINI_API_KEY"]
 )
 
 prompt = string.Template("""\
-<moves>
+We are playing Colossal Cave Adventure; each person gets to pick one move. This is your turn.
+Below are the last 50 moves, oldest to newest.
+Following that are the notes from the person who chose the previous move.
+Decide on a move and return it, prefixed with "move:".
+Then, compile everything you know about the game, the current state, and your strategy to pass on to the next player, and return this prefixed with "notes:".
+To make the best decision, list all the moves you can think of and the likely outcomes of each move, and choose the one that aligns most with furthering your progress in the game.
+IMPORTANT: don't do the same thing repeatedly if it isn't working.
+
+<MOVES>
 $moves
-</moves>
+</MOVES>
 
-<notes>
+<NOTES>
 $notes
-</notes>
+</NOTES>
+""")
 
-You are playing Colossal Cave Adventure.
-Above are the last 100 moves of the game, with the most recent move last.
-Followed by that is your notes document, aka your scratch space.
-This serves as your memory; you will have these notes across replays, so that you can adapt to the game.
-You should use this space for notes that will help you later in the game, or on a future playthrough.
-Decide on a move and return it, prefixed with "move:". Then update your notes and return them, prefixed with "notes:".
-Make sure to think through each move, carefully considering all options and their possible outcomes before choosing a move.
-If you're confused about how to do something, move on from it.
+prompt = string.Template("""\
+You are an experienced adventurer exploring *Colossal Cave Adventure*. Your mission is to navigate the cave, find treasures, and overcome obstacles. Each turn, you pick one move. This is your turn.
 
-You can use the special move "!restart" to reset the game if you are truly stuck.
+Below are the last 10 moves (oldest to newest) and the notes from the previous player. Use this to decide your next move and update the notes.
+
+
+**Recent Moves:**
+$moves
+
+
+**Previous Notes:**
+$notes
+
+
+**Instructions:**
+1. **Review the Situation**: Think step-by-step:
+   - What do the past moves tell you about your current location and progress?
+   - What worked or didn't work before?
+2. **Plan Your Move**: List possible actions you can take now and predict their outcomes. Choose the move that best advances your mission (e.g., exploring new areas, finding treasures).
+3. **Check Your Strategy**: Does this move align with the previous notes? If not, adjust your plan.
+4. **Update the Notes**:
+   - **Current Situation:** Summarize your current location, immediate goals, and any obstacles.
+   - **General Gameplay Strategies:** Add any new, reusable insights you've learned that could help in future sessions (e.g., "Keys are often found in side tunnels" or "Backtracking reveals hidden paths").
+     - Review the previous notes and expand this section, keeping past strategies and adding new ones to build a knowledge base for future games.
+     - These strategies will be used in future sessions to improve your gameplay, so focus on lessons that remain useful over time.
+
+**Output Format:**
+- "move: [your move]"
+- "notes:
+  - Current Situation: [details]
+  - General Gameplay Strategies: [strategies]"
+
+**Tip**: If a previous action (e.g., "hit the door") failed, try something new like searching for a key.
 """)
 
 class Log:
@@ -99,10 +131,9 @@ def get_move(moves, notes, extra_prompt=""):
         log.err(f"Parsed move as '{new_move}'")
 
         notes_match = re.search(r'notes:(.*)', content, re.DOTALL)
-        if not notes_match or notes_match.group(1) is None:
-            log.err(f"Error, running again: bad formatting for notes (content: {content}))")
-            return get_move(moves, notes)
-        new_notes = notes_match.group(1).strip()
+        new_notes = ""
+        if notes_match and notes_match.group(1):
+            new_notes = notes_match.group(1).strip()
         log.err(f"Parsed notes as '{new_notes}'")
 
         return new_move, new_notes
@@ -132,7 +163,8 @@ class GameController:
         self.writing = True
         # if cmd == "!reset":
         self.proc.stdin.write(cmd + '\n')
-        self.proc.stdin.flush()
+        if not self.proc.stdin.closed:
+            self.proc.stdin.flush()
         self.writing = False
 
     def read(self):
@@ -151,6 +183,12 @@ class GameController:
             except TypeError:
                 break
 
+        buffer2 = []
+        for line in buffer.split('\n'):
+            if not line.startswith("> "):
+                buffer2.append(line)
+
+        buffer = '\n'.join(buffer2).strip()
         return buffer
 
     def stop(self):
@@ -176,23 +214,24 @@ signal.signal(signal.SIGINT, signal_handler)
 controller = GameController()
 
 def main():
-    notes = ""
-    move = ""
-    moves = []
     last_time = 0
+    cmd = ""
+    moves = []
+    notes = ""
 
     while True:
         output = controller.read()
-        log.out(output)
-        moves.append(Move(move, output))
+        move = Move(cmd, output)
+        moves.append(move)
+        log.out(f"{move}\n\n")
 
         time_delta = time.time() - last_time
-        if time_delta < 3:
-            time.sleep(3 - time_delta)
+        if time_delta < 4:
+            time.sleep(4 - time_delta)
         last_time = time.time()
 
-        move, notes = get_move(moves, notes)
-        controller.send(move)
+        cmd, notes = get_move(moves[-10:], notes)
+        controller.send(cmd)
 
 if __name__ == "__main__":
     main()
